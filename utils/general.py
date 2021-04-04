@@ -22,6 +22,8 @@ from scipy.cluster.vq import kmeans
 from scipy.signal import butter, filtfilt
 from tqdm import tqdm
 
+import pickle
+
 from utils.torch_utils import init_seeds, is_parallel
 
 # Set printoptions
@@ -443,7 +445,7 @@ class BCEBlurWithLogitsLoss(nn.Module):
 def compute_loss(p, targets, model):  # predictions, targets, model
     device = targets.device
     lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
-    tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
+    tcls, tbox, indices, anchors, ll = build_targets(p, targets, model)  # targets
     h = model.hyp  # hyperparameters
 
     # Define criteria
@@ -457,6 +459,8 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     g = h['fl_gamma']  # focal loss gamma
     if g > 0:
         BCEcls, BCEobj = FocalLoss(BCEcls, g), FocalLoss(BCEobj, g)
+
+    lll = []
 
     # Losses
     nt = 0  # number of targets
@@ -492,6 +496,7 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             # Append targets to text file
             # with open('targets.txt', 'a') as file:
             #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
+        lll.append({''})
 
         lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
 
@@ -502,6 +507,16 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     bs = tobj.shape[0]  # batch size
 
     loss = lbox + lobj + lcls
+    with open('lossvals.pkl', 'wb') as lossvals:
+      pickle.dump({'tcls': [t.detach().cpu().numpy() for t in tcls],
+      'tbox': [t.detach().cpu().numpy() for t in tbox], 'variables': ll,
+      'indices': [tuple([q.detach().cpu().numpy() for q in t]) for t in indices],
+      'anchors': [t.detach().cpu().numpy() for t in anchors],
+      'lbox': lbox.detach().cpu().numpy(),
+      'lobj': lobj.detach().cpu().numpy(),
+      'lcls': lcls.detach().cpu().numpy(),
+      'loss': loss.detach().cpu().numpy()}, lossvals)
+
     return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
 
@@ -510,6 +525,8 @@ def build_targets(p, targets, model):
     tcls, tbox, indices, anch = [], [], [], []
     gain = torch.ones(6, device=targets.device)  # normalized to gridspace gain
     off = torch.tensor([[1, 0], [0, 1], [-1, 0], [0, -1]], device=targets.device).float()  # overlap offsets
+
+    ll = []
 
     g = 0.5  # offset
     multi_gpu = is_parallel(model)
@@ -543,6 +560,11 @@ def build_targets(p, targets, model):
         gij = (gxy - offsets).long()
         gi, gj = gij.T  # grid xy indices
 
+        if i > 100:
+          break
+        ll.append({'b': b.detach().cpu().numpy(), 'c': c.detach().cpu().numpy(), 'gi': gi.detach().cpu().numpy(), 'gj': gj.detach().cpu().numpy()})
+        #print(b.shape, b.detach().cpu().numpy(), c.shape, c.detach().cpu().numpy(), gi.shape, gi.detach().cpu().numpy(), gj.shape, gj.detach().cpu().numpy())
+
         # Append
         #indices.append((b, a, gj, gi))  # image, anchor, grid indices
         indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
@@ -550,7 +572,10 @@ def build_targets(p, targets, model):
         anch.append(anchors[a])  # anchors
         tcls.append(c)  # class
 
-    return tcls, tbox, indices, anch
+    with open('otherlossvals', 'wb') as lossvals:
+      pickle.dump(ll, lossvals)
+
+    return tcls, tbox, indices, anch, ll
 
 
 def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, classes=None, agnostic=False):
